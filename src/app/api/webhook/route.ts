@@ -1,9 +1,17 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import {
-  addWebhookEvent,
-  AnliWebhookPayload,
-} from "@/lib/event-store";
+  DEMO_HOTEL_ID,
+  storeWebhookEvent,
+} from "@/lib/booking-service";
+
+type AnliWebhookPayload = {
+  hotelId: number;
+  eventType: string;
+  event: string;
+  timestamp: string;
+  data: unknown;
+};
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,11 +26,13 @@ function isAnliPayload(value: unknown): value is AnliWebhookPayload {
   if (!isRecord(value)) return false;
 
   return (
+    typeof value.hotelId === "number" &&
     Number.isSafeInteger(value.hotelId) &&
     typeof value.eventType === "string" &&
     value.eventType.length > 0 &&
     typeof value.event === "string" &&
     typeof value.timestamp === "string" &&
+    Number.isFinite(Date.parse(value.timestamp)) &&
     Object.hasOwn(value, "data")
   );
 }
@@ -52,9 +62,12 @@ async function readBody(request: NextRequest): Promise<string | null> {
 
 async function receiveWebhook(request: NextRequest) {
   const secret = process.env.ANLI_WEBHOOK_SECRET;
-  if (!secret) {
+  if (!secret || secret.length < 32 || secret.startsWith("replace-")) {
     return NextResponse.json(
-      { error: "ANLI_WEBHOOK_SECRET is not configured on the tester." },
+      {
+        error:
+          "ANLI_WEBHOOK_SECRET must be set to a non-placeholder value of at least 32 characters.",
+      },
       { status: 503 },
     );
   }
@@ -103,11 +116,30 @@ async function receiveWebhook(request: NextRequest) {
     );
   }
 
-  const event = addWebhookEvent(parsed, request.method);
-  return NextResponse.json(
-    { accepted: true, id: event.id, signatureVerified: true },
-    { status: 202 },
-  );
+  if (parsed.hotelId !== DEMO_HOTEL_ID) {
+    return NextResponse.json(
+      { error: "This tester is configured for hotelId 1." },
+      { status: 403 },
+    );
+  }
+
+  try {
+    const stored = await storeWebhookEvent(parsed);
+    return NextResponse.json(
+      {
+        accepted: true,
+        eventId: stored.eventId,
+        bookingStored: Boolean(stored.booking),
+      },
+      { status: 202 },
+    );
+  } catch (error) {
+    console.error("Could not persist Anli webhook notification:", error);
+    return NextResponse.json(
+      { error: "The notification could not be saved to the booking database." },
+      { status: 503 },
+    );
+  }
 }
 
 export const POST = receiveWebhook;
